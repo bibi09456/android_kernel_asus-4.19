@@ -266,12 +266,20 @@ static const struct file_operations pm_qos_debug_fops = {
 	.release        = single_release,
 };
 
-static inline void pm_qos_set_value_for_cpus(struct pm_qos_constraints *c,
-					     bool dev_req)
+static inline int pm_qos_set_value_for_cpus(struct pm_qos_constraints *c,
+		struct cpumask *cpus, bool dev_req)
 {
 	struct pm_qos_request *req = NULL;
 	int cpu;
 	s32 qos_val[NR_CPUS] = { [0 ... (NR_CPUS - 1)] = c->default_value };
+
+	/*
+	 * pm_qos_constraints can be from different classes,
+	 * Update cpumask only only for CPU_DMA_LATENCY classes
+	 */
+
+	if (c != pm_qos_array[PM_QOS_CPU_DMA_LATENCY]->constraints)
+		return -EINVAL;
 
 	/*
 	 * pm_qos_set_value_for_cpus expects all c->list elements to be of type
@@ -284,7 +292,7 @@ static inline void pm_qos_set_value_for_cpus(struct pm_qos_constraints *c,
 	 * can safely skip updating target_per_cpu for device requests.
 	 */
 	if (dev_req)
-		return;
+		return 0;
 
 	plist_for_each_entry(req, &c->list, node) {
 		for_each_cpu(cpu, &req->cpus_affine) {
@@ -362,7 +370,7 @@ int pm_qos_update_target(struct pm_qos_constraints *c, struct plist_node *node,
 	curr_value = pm_qos_get_value(c);
 	cpumask_clear(&cpus);
 	pm_qos_set_value(c, curr_value);
-	pm_qos_set_value_for_cpus(c, dev_req);
+	ret = pm_qos_set_value_for_cpus(c, &cpus, dev_req);
 
 	spin_unlock_irqrestore(&pm_qos_lock, flags);
 
@@ -575,8 +583,9 @@ static void pm_qos_irq_notify(struct irq_affinity_notify *notify,
 
 	spin_unlock_irqrestore(&pm_qos_lock, flags);
 
-	pm_qos_update_target(c, &req->node, PM_QOS_UPDATE_REQ, req->node.prio,
-			false);
+	if (affinity_changed)
+		pm_qos_update_target(c, &req->node, PM_QOS_UPDATE_REQ,
+				     req->node.prio, false);
 }
 #endif
 
@@ -895,9 +904,6 @@ static ssize_t pm_qos_power_write(struct file *filp, const char __user *buf,
 {
 	s32 value;
 	struct pm_qos_request *req;
-
-	/* Don't let userspace impose restrictions on CPU idle levels */
-	return count;
 
 	if (count == sizeof(s32)) {
 		if (copy_from_user(&value, buf, sizeof(s32)))
